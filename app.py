@@ -177,3 +177,7 @@ while True:
         print("异常:", e)
 
     time.sleep(1)
+
+    if __name__ == '__main__':
+        port = int(os.environ.get('PORT', 5000))  # 关键：Railway用PORT变量
+        app.run(host='0.0.0.0', port=port, debug=True)
