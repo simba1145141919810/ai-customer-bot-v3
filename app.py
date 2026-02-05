@@ -1,14 +1,17 @@
 import os
 from dotenv import load_dotenv
-import requests
-import time
+from flask import Flask, request, jsonify
 from openai import OpenAI
+import requests
 import json
 
 load_dotenv()
 
+app = Flask(__name__)
+
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
+OPENAI_API_KEY = GROK_API_KEY  # 兼容 SDK 检查
 
 client = OpenAI(
     api_key=GROK_API_KEY,
@@ -17,28 +20,29 @@ client = OpenAI(
 
 MODEL_NAME = "grok-4-1-fast-reasoning"
 
-offset = 0
-
+# 模拟订单数据库
 FAKE_ORDERS = {
     "14514": {"status": "已发货", "tracking": "J&T Express: JT123456", "items": "Redmi Note 12"},
     "12345": {"status": "处理中", "tracking": "未生成", "items": "Samsung A14"},
     "99999": {"status": "已退货", "tracking": "退款中", "items": "鞋子"}
 }
 
+# 模拟商品数据库
 FAKE_PRODUCTS = [
-    {"name": "Redmi Note 12", "price": "SGD 299", "specs": "120Hz屏, 5000mAh电池"},
-    {"name": "Realme C55", "price": "SGD 189", "specs": "大电池快充, 便宜替代"},
-    {"name": "Samsung A14", "price": "SGD 219", "specs": "三星品质, 性价比高"},
-    {"name": "iPhone 13", "price": "SGD 999", "specs": "苹果生态"},
-    {"name": "Running Shoes", "price": "SGD 89", "specs": "轻便透气"}
+    {"name": "Redmi Note 12", "price": "SGD 299", "specs": "120Hz屏, 5000mAh电池, 骁龙处理器"},
+    {"name": "Realme C55", "price": "SGD 189", "specs": "大电池快充, 自拍强, 便宜替代"},
+    {"name": "Samsung A14", "price": "SGD 219", "specs": "三星品质, 拍照稳, 性价比高"},
+    {"name": "iPhone 13", "price": "SGD 999", "specs": "苹果生态, 性能顶"},
+    {"name": "Running Shoes", "price": "SGD 89", "specs": "轻便透气, 适合跑步"}
 ]
 
+# 工具定义
 tools = [
     {
         "type": "function",
         "function": {
             "name": "get_order_status",
-            "description": "查询订单状态",
+            "description": "查询订单状态，需要订单号",
             "parameters": {
                 "type": "object",
                 "properties": {"order_number": {"type": "string"}},
@@ -50,7 +54,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "search_products",
-            "description": "必须调用此工具搜索并推荐产品",
+            "description": "用户问产品推荐、替代、更便宜等，必须调用此工具搜索商品库",
             "parameters": {
                 "type": "object",
                 "properties": {"query": {"type": "string"}},
@@ -65,7 +69,7 @@ def get_order_status(order_number: str):
     order = FAKE_ORDERS.get(order_number)
     if order:
         return f"订单 {order_number}：{order['status']}，商品 {order['items']}，追踪 {order['tracking']}。"
-    return "未找到订单。"
+    return f"未找到订单 {order_number}。"
 
 
 def search_products(query: str):
@@ -77,107 +81,90 @@ def search_products(query: str):
                keywords) or "便宜" in query_lower or "替代" in query_lower:
             matches.append(p)
     if not matches:
-        return "没找到完美匹配，建议看看热门商品。"
+        return "抱歉，没找到完美匹配，但可以看看这些热门商品。"
 
-    rec = "为您推荐：\n"
+    rec = "为您推荐这些：\n"
     for i, p in enumerate(matches[:5], 1):
         rec += f"{i}. {p['name']} - {p['price']}\n   {p['specs']}\n"
     return rec
 
 
-def get_updates():
-    global offset
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/getUpdates?offset={offset}&timeout=30"
-    response = requests.get(url)
-    if response.status_code == 200:
-        data = response.json()
-        if data["ok"]:
-            return data["result"]
-    print("getUpdates 错误:", response.status_code, response.text)
-    return []
-
-
-def send_message(chat_id, text):
-    payload = {"chat_id": chat_id, "text": text}
-    response = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload)
-    print("发送回复:", response.status_code, response.text)
-
-
 SYSTEM_PROMPT = """
 你是一个专业的东南亚电商客服机器人，使用 Grok 的聪明和幽默。
 用用户语言回复。
-必须优先调用工具：订单号用 get_order_status，推荐/替代/便宜用 search_products。
-回复自然、简洁。
+用户问推荐/替代/便宜/手机等，必须优先调用 search_products 工具。
+订单号必须调用 get_order_status。
+回复自然、简洁，像真人。
 """
 
 conversation_history = {}
 
-print("Grok AI 客服 Bot (最终修复) 启动了...")
 
-while True:
-    try:
-        updates = get_updates()
-        for update in updates:
-            if 'message' in update:
-                chat_id = update['message']['chat']['id']
-                user_text = update['message'].get('text', '')
-                print(f"用户 {chat_id} 说: {user_text}")
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    update = request.get_json()
 
-                if chat_id not in conversation_history:
-                    conversation_history[chat_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
+    if 'message' in update:
+        chat_id = update['message']['chat']['id']
+        user_text = update['message'].get('text', '')
 
-                conversation_history[chat_id].append({"role": "user", "content": user_text})
+        if chat_id not in conversation_history:
+            conversation_history[chat_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-                response = client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=conversation_history[chat_id],
-                    tools=tools,
-                    tool_choice="auto",
-                    max_tokens=512,
-                    temperature=0.7
-                )
+        conversation_history[chat_id].append({"role": "user", "content": user_text})
 
-                message = response.choices[0].message
-                reply_text = message.content or ""
+        response = client.chat.completions.create(
+            model=MODEL_NAME,
+            messages=conversation_history[chat_id],
+            tools=tools,
+            tool_choice="auto",
+            max_tokens=512,
+            temperature=0.7
+        )
 
-                if message.tool_calls:
-                    tool_results = ""
-                    for tool_call in message.tool_calls:
-                        func_name = tool_call.function.name
-                        args = json.loads(tool_call.function.arguments)
-                        query = args.get("query") or args.get("order_number", "")
+        message = response.choices[0].message
+        reply_text = message.content or ""
 
-                        if func_name == "get_order_status":
-                            result = get_order_status(query)
-                        else:
-                            result = search_products(query)
+        if message.tool_calls:
+            tool_results = ""
+            for tool_call in message.tool_calls:
+                func_name = tool_call.function.name
+                args = json.loads(tool_call.function.arguments)
+                query = args.get("query") or args.get("order_number", "")
 
-                        tool_results += f"\n\n{result}"
+                if func_name == "get_order_status":
+                    result = get_order_status(query)
+                else:
+                    result = search_products(query)
 
-                        conversation_history[chat_id].append({
-                            "role": "tool",
-                            "tool_call_id": tool_call.id,
-                            "name": func_name,
-                            "content": result
-                        })
+                tool_results += f"\n\n{result}"
 
-                    second_response = client.chat.completions.create(
-                        model=MODEL_NAME,
-                        messages=conversation_history[chat_id],
-                        max_tokens=512,
-                        temperature=0.7
-                    )
-                    reply_text = second_response.choices[0].message.content + tool_results  # 强制加结果
+                conversation_history[chat_id].append({
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "name": func_name,
+                    "content": result
+                })
 
-                print(f"Grok 最终回复: {reply_text}")
-                send_message(chat_id, reply_text)
+            second_response = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=conversation_history[chat_id],
+                max_tokens=512,
+                temperature=0.7
+            )
+            reply_text = second_response.choices[0].message.content + tool_results
 
-                offset = update['update_id'] + 1
-    except Exception as e:
-        print("异常:", e)
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                      json={"chat_id": chat_id, "text": reply_text})
 
-    time.sleep(1)
+    return jsonify({"status": "ok"})
 
-    if __name__ == '__main__':
-        port = int(os.environ.get('PORT', 5000))  # 关键：Railway用PORT变量
-        app.run(host='0.0.0.0', port=port, debug=True)
+
+@app.route('/')
+def home():
+    return "Bot is running!"
+
+
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))  # 云平台端口适配
+    app.run(host='0.0.0.0', port=port)
