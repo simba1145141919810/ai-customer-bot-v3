@@ -19,7 +19,7 @@ def get_env_var(name):
 
 # Grok 配置
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-API_KEY = os.getenv("GROK_API_KEY")
+GROK_API_KEY = os.getenv("GROK_API_KEY")
 
 client = OpenAI(
     api_key=GROK_API_KEY,
