@@ -34,6 +34,17 @@ FAKE_PRODUCTS = [
      "desc": "不完美的肌理，触感温润，每一件都是独一无二。"}
 ]
 
+# --- 辅助函数：专门发送图片到 Telegram ---
+def send_telegram_photo(chat_id, photo_url, caption):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+    payload = {
+        "chat_id": chat_id,
+        "photo": photo_url,
+        "caption": caption,
+        "parse_mode": "Markdown"
+    }
+    requests.post(url, json=payload)
+
 # --- 3. 存储对话历史 ---
 conversation_history = {}
 
@@ -79,6 +90,20 @@ tools = [
             "description": "搜索产品推荐、风格匹配或艺术单品",
             "parameters": {
                 "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "用户想要寻找的风格、颜色或产品关键词"}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_products",
+            "description": "搜索产品推荐、风格匹配或艺术单品",
+            "parameters": {
+                "type": "object",
                 "properties": {"query": {"type": "string"}},
                 "required": ["query"]
             }
@@ -88,19 +113,28 @@ tools = [
 
 
 # --- 6. 工具逻辑实现 ---
-def call_tool(func_name, args):
+def call_tool(func_name, args, chat_id):
     if func_name == "get_order_status":
         order_id = args.get("order_number")
         return str(FAKE_ORDERS.get(order_id, "Sorry, no record for this order number leh."))
 
     if func_name == "search_products":
         query = args.get("query", "").lower()
-        # 简单的匹配逻辑
         results = [p for p in FAKE_PRODUCTS if query in p['name'].lower() or query in p['style'].lower()]
-        if not results:
-            return "We don't have exactly that, but check our latest Art Series: " + str(FAKE_PRODUCTS[0])
-        return str(results)
+
+        # 如果找到了产品，先尝试发一张图
+        if results:
+            target = results[0]
+            # 这里调用上面定义的发送图片函数
+            caption = f"*{target['name']}*\nPrice: {target['price']}\nStyle: {target['style']}"
+            send_telegram_photo(chat_id, target['img'], caption)
+            return f"我已经把 {target['name']} 的图片发给你看啦！具体描述是：{target.get('desc', '非常艺术的设计。')}"
+
+        return "Aiyoh, nothing exact match, but you can check our Art Series!"
+
     return "Unknown tool calling."
+
+
 
 
 # --- 7. AI 核心逻辑 ---
@@ -128,7 +162,7 @@ def ask_grok(chat_id, user_input):
             for tool_call in msg.tool_calls:
                 func_name = tool_call.function.name
                 args = json.loads(tool_call.function.arguments)
-                result = call_tool(func_name, args)
+                result = call_tool(func_name, args, chat_id)
 
                 conversation_history[chat_id].append({
                     "role": "tool",
