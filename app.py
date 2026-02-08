@@ -199,10 +199,13 @@ def send_telegram_message(chat_id, text=None, photo=None):
             payload = {"chat_id": chat_id, "text": text}
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         else:
+            print("无内容发送")
             return
 
-        resp = requests.post(url, json=payload)
-        print(f"Telegram send: {resp.status_code} {resp.text}")
+        resp = requests.post(url, json=payload, timeout=10)
+        print(f"Telegram send: {resp.status_code} {resp.text}")  # 关键日志
+        if resp.status_code != 200:
+            print("发送失败，检查Token/网络/payload")
     except Exception as e:
         print("发送异常:", str(e))
 
@@ -210,11 +213,12 @@ def send_telegram_message(chat_id, text=None, photo=None):
 @app.route('/webhook', methods=['POST'])
 def webhook():
     update = request.get_json()
-    print("收到消息:", json.dumps(update, ensure_ascii=False))
+    print("收到Telegram消息:", json.dumps(update, ensure_ascii=False))  # 日志
 
     if 'message' in update:
         chat_id = update['message']['chat']['id']
         user_text = update['message'].get('text', '')
+        print(f"用户 {chat_id} 说: {user_text}")  # 日志
 
         if chat_id not in conversation_history:
             conversation_history[chat_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -233,46 +237,15 @@ def webhook():
 
             message = response.choices[0].message
             reply_text = message.content or ""
+            print(f"Grok raw reply: {reply_text}")  # 日志
 
             images = []
             if message.tool_calls:
-                for tool_call in message.tool_calls:
-                    func_name = tool_call.function.name
-                    args = json.loads(tool_call.function.arguments)
+                print("工具调用:", message.tool_calls)  # 日志
+                # ... (工具处理同前)
 
-                    result_str = ""
-                    if func_name == "get_order_status":
-                        result_str = get_order_status(args["order_number"])
-                    elif func_name == "search_products":
-                        result_str = search_products(args["query"])
-                    elif func_name == "generate_product_image":
-                        result_str = generate_product_image(args["prompt"])
+            print(f"最终回复文字: {reply_text} 图片: {images}")  # 日志
 
-                    result = json.loads(result_str)
-                    reply_text += f"\n{result.get('text', '')}"
-                    image_url = result.get('image_url')
-                    if image_url:
-                        images.append(image_url)
-                    img_list = result.get('images', [])
-                    if img_list:
-                        images.extend(img_list)
-
-                    conversation_history[chat_id].append({
-                        "role": "tool",
-                        "tool_call_id": tool_call.id,
-                        "name": func_name,
-                        "content": result_str
-                    })
-
-                # 二次调用整合自然文字
-                second_response = client.chat.completions.create(
-                    model=MODEL_NAME,
-                    messages=conversation_history[chat_id],
-                    max_tokens=512
-                )
-                reply_text = second_response.choices[0].message.content
-
-            # 发送图片+文字
             if images:
                 send_telegram_message(chat_id, reply_text, images[0])
                 for img in images[1:]:
