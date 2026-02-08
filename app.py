@@ -9,17 +9,14 @@ load_dotenv()
 
 app = Flask(__name__)
 
-# --- 核心配置：直接在函数外层通过 os.environ 确保全局访问 ---
-# 建议在 Railway Variables 中设置这些 Key
-def get_env_var(name):
-    value = os.environ.get(name)
-    if not value:
-        print(f"Warning: Environment variable {name} is missing!")
-    return value
-
-# Grok 配置
+# 配置
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
+OPENAI_API_KEY = GROK_API_KEY  # SDK兼容
+
+if not TELEGRAM_TOKEN:
+    print("错误：TELEGRAM_TOKEN 未设置")
+    exit()
 
 client = OpenAI(
     api_key=GROK_API_KEY,
@@ -28,13 +25,13 @@ client = OpenAI(
 
 MODEL_NAME = "grok-4-1-fast-reasoning"
 
-# 模拟数据库（真实部署时替换为Shopee/Lazada API）
+# 模拟数据库（真实部署替换为Shopee/Lazada API获取真实图片URL）
 FAKE_ORDERS = {
     "14514": {
         "status": "已发货",
         "tracking": "J&T Express: JT123456",
         "items": "Redmi Note 12",
-        "image_url": "https://example.com/images/redmi_note12.jpg"  # 店铺真实产品图
+        "image_url": "https://example.com/images/redmi_note12.jpg"  # 店铺真实图
     },
     "12345": {
         "status": "处理中",
@@ -83,13 +80,13 @@ FAKE_PRODUCTS = [
     }
 ]
 
-# 工具定义（新增获取真实产品图片）
+# 工具定义
 tools = [
     {
         "type": "function",
         "function": {
             "name": "get_order_status",
-            "description": "查询订单状态，返回文字+产品真实图片",
+            "description": "查询订单状态，返回文字和产品真实图片",
             "parameters": {
                 "type": "object",
                 "properties": {"order_number": {"type": "string"}},
@@ -101,7 +98,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "search_products",
-            "description": "搜索并推荐产品，返回列表+每件商品真实图片",
+            "description": "搜索并推荐产品，返回文字和多张真实产品图片",
             "parameters": {
                 "type": "object",
                 "properties": {"query": {"type": "string"}},
@@ -113,7 +110,7 @@ tools = [
         "type": "function",
         "function": {
             "name": "generate_product_image",
-            "description": "生成产品场景图（如搭配图、效果图）",
+            "description": "生成产品场景图或效果图",
             "parameters": {
                 "type": "object",
                 "properties": {"prompt": {"type": "string"}},
@@ -124,6 +121,7 @@ tools = [
 ]
 
 
+# 工具函数
 def get_order_status(order_number: str):
     order = FAKE_ORDERS.get(order_number)
     if order:
@@ -167,6 +165,7 @@ def generate_product_image(prompt: str):
         return json.dumps({"text": f"生成失败：{str(e)}", "image_url": None})
 
 
+# 系统提示词
 SYSTEM_PROMPT = """
 # Role
 你是一个在东南亚电商界赫赫有名的“金牌导购+销售+客服”。你不仅懂产品，更懂美学和生活方式。
@@ -190,18 +189,28 @@ SYSTEM_PROMPT = """
 conversation_history = {}
 
 
+# 发送Telegram消息（支持文字+图片，多图分发）
 def send_telegram_message(chat_id, text=None, photo=None):
-    if photo:
-        payload = {"chat_id": chat_id, "photo": photo, "caption": text or ""}
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", json=payload)
-    elif text:
-        payload = {"chat_id": chat_id, "text": text}
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload)
+    try:
+        if photo:
+            payload = {"chat_id": chat_id, "photo": photo, "caption": text or ""}
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+        elif text:
+            payload = {"chat_id": chat_id, "text": text}
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        else:
+            return
+
+        resp = requests.post(url, json=payload)
+        print(f"Telegram send: {resp.status_code} {resp.text}")
+    except Exception as e:
+        print("发送异常:", str(e))
 
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
     update = request.get_json()
+    print("收到消息:", json.dumps(update, ensure_ascii=False))
 
     if 'message' in update:
         chat_id = update['message']['chat']['id']
@@ -255,7 +264,7 @@ def webhook():
                         "content": result_str
                     })
 
-                # 二次调用整合文字
+                # 二次调用整合自然文字
                 second_response = client.chat.completions.create(
                     model=MODEL_NAME,
                     messages=conversation_history[chat_id],
@@ -263,9 +272,8 @@ def webhook():
                 )
                 reply_text = second_response.choices[0].message.content
 
-            # 发送：优先图片+文字，其次纯文字
+            # 发送图片+文字
             if images:
-                # 发送第一张图+文字，其他图单独发（Telegram限制）
                 send_telegram_message(chat_id, reply_text, images[0])
                 for img in images[1:]:
                     send_telegram_message(chat_id, None, img)
@@ -273,6 +281,7 @@ def webhook():
                 send_telegram_message(chat_id, reply_text)
 
         except Exception as e:
+            print("处理异常:", str(e))
             send_telegram_message(chat_id, "抱歉，系统出错，请稍后再试。")
 
     return jsonify({"status": "ok"})
