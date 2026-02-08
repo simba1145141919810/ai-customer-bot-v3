@@ -19,7 +19,7 @@ client = OpenAI(
     base_url="https://api.x.ai/v1"
 )
 
-MODEL_NAME = "grok-beta"
+MODEL_NAME = "grok-4-1-fast-reasoning"
 
 # --- 2. 模拟数据库 (增加更具艺术感的商品描述) ---
 FAKE_ORDERS = {
