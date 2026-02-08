@@ -10,6 +10,7 @@ load_dotenv()
 app = Flask(__name__)
 
 # Grok 配置
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 OPENAI_API_KEY = GROK_API_KEY  # SDK兼容
 
