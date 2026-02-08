@@ -5,7 +5,7 @@ from flask import Flask, request, jsonify
 from openai import OpenAI
 from dotenv import load_dotenv
 
-# 加载本地环境变量
+# 加载环境变量
 load_dotenv()
 
 app = Flask(__name__)
@@ -21,20 +21,38 @@ client = OpenAI(
 
 MODEL_NAME = "grok-4-1-fast-reasoning"
 
-# --- 2. 模拟数据库 (增加更具艺术感的商品描述) ---
+# --- 2. 模拟数据库 (包含图片链接) ---
 FAKE_ORDERS = {
     "14514": {"status": "已发货", "tracking": "J&T Express: JT123456", "items": "极简几何手机壳"},
     "12345": {"status": "处理中", "items": "莫奈色系装饰画"}
 }
 
 FAKE_PRODUCTS = [
-    {"name": "极简几何手机壳", "price": "SGD 25", "style": "包豪斯主义", "desc": "线条利落，适合追求理性的你。"},
-    {"name": "莫奈色系装饰画", "price": "SGD 89", "style": "印象派", "desc": "色彩柔和，能瞬间提升客厅的艺术氛围。"},
-    {"name": "手工陶瓷马克杯", "price": "SGD 35", "style": "侘寂风",
-     "desc": "不完美的肌理，触感温润，每一件都是独一无二。"}
+    {
+        "name": "极简几何手机壳",
+        "price": "SGD 25",
+        "style": "包豪斯主义",
+        "desc": "线条利落，适合追求理性的你。配合侘寂风桌面绝佳。",
+        "img": "https://images.unsplash.com/photo-1603313011101-31c726a54881?auto=format&fit=crop&w=500&q=80"
+    },
+    {
+        "name": "莫奈色系装饰画",
+        "price": "SGD 89",
+        "style": "印象派",
+        "desc": "色彩柔和，能瞬间提升客厅的艺术氛围。",
+        "img": "https://images.unsplash.com/photo-1579783902614-a3fb3927b6a5?auto=format&fit=crop&w=500&q=80"
+    },
+    {
+        "name": "手工陶瓷马克杯",
+        "price": "SGD 35",
+        "style": "侘寂风",
+        "desc": "不完美的肌理，触感温润，每一件都是独一无二。",
+        "img": "https://images.unsplash.com/photo-1580915411954-282cb1b0d780?auto=format&fit=crop&w=500&q=80"
+    }
 ]
 
-# --- 辅助函数：专门发送图片到 Telegram ---
+
+# --- 3. 辅助函数：专门发送图片到 Telegram ---
 def send_telegram_photo(chat_id, photo_url, caption):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
     payload = {
@@ -43,12 +61,16 @@ def send_telegram_photo(chat_id, photo_url, caption):
         "caption": caption,
         "parse_mode": "Markdown"
     }
-    requests.post(url, json=payload)
+    try:
+        requests.post(url, json=payload)
+    except Exception as e:
+        print(f"发送图片失败: {e}")
 
-# --- 3. 存储对话历史 ---
+
+# --- 4. 存储对话历史 ---
 conversation_history = {}
 
-# --- 4. 系统提示词 (System Prompt) ---
+# --- 5. 系统提示词 ---
 SYSTEM_PROMPT = """
 # Role
 你是一个在东南亚电商界赫赫有名的“金牌导购+销售+客服”。你不仅懂产品，更懂美学和生活方式。
@@ -57,7 +79,6 @@ SYSTEM_PROMPT = """
 1. **地道表达**：你是擅长世界各国语言，尤其是东南亚各国语言，根据用户语言无缝切换，同时保持幽默感。
 2. **审美赋能**：你擅长艺术，设计，推销，所以你对颜色、材质、设计有专业见解。不要只报参数，要告诉用户这个产品“怎么美”。
 3. **颠覆逻辑**：如果用户嫌贵，不要只给折扣，要告诉他/她“这是一种对生活的投资”。
-4. **简洁明了**：回复不用太多，客户一般不愿意阅读长篇大论，因此只需要生成简洁明了的回答，让客户快速获取信息。
 
 # Goals
 - 解决问题是基础，提供情绪价值和审美建议是核心。
@@ -69,7 +90,7 @@ SYSTEM_PROMPT = """
 - 用户查进度时，必须调用 get_order_status。
 """
 
-# --- 5. 工具定义 (现在有两个工具了) ---
+# --- 6. 工具定义 ---
 tools = [
     {
         "type": "function",
@@ -90,20 +111,6 @@ tools = [
             "description": "搜索产品推荐、风格匹配或艺术单品",
             "parameters": {
                 "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "用户想要寻找的风格、颜色或产品关键词"}
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_products",
-            "description": "搜索产品推荐、风格匹配或艺术单品",
-            "parameters": {
-                "type": "object",
                 "properties": {"query": {"type": "string"}},
                 "required": ["query"]
             }
@@ -112,7 +119,7 @@ tools = [
 ]
 
 
-# --- 6. 工具逻辑实现 ---
+# --- 7. 工具逻辑实现 ---
 def call_tool(func_name, args, chat_id):
     if func_name == "get_order_status":
         order_id = args.get("order_number")
@@ -122,30 +129,24 @@ def call_tool(func_name, args, chat_id):
         query = args.get("query", "").lower()
         results = [p for p in FAKE_PRODUCTS if query in p['name'].lower() or query in p['style'].lower()]
 
-        # 如果找到了产品，先尝试发一张图
         if results:
             target = results[0]
-            # 这里调用上面定义的发送图片函数
+            # 找到产品，立刻触发发图
             caption = f"*{target['name']}*\nPrice: {target['price']}\nStyle: {target['style']}"
             send_telegram_photo(chat_id, target['img'], caption)
-            return f"我已经把 {target['name']} 的图片发给你看啦！具体描述是：{target.get('desc', '非常艺术的设计。')}"
+            return f"Found it! 我已经把图片的预览发给你了。这是我们的{target['name']}，{target['desc']}"
 
-        return "Aiyoh, nothing exact match, but you can check our Art Series!"
+        return "Aiyoh, nothing exact match, but check our latest Art Series: " + str(FAKE_PRODUCTS[0])
 
-    return "Unknown tool calling."
-
-
+    return "Unknown tool."
 
 
-# --- 7. AI 核心逻辑 ---
+# --- 8. AI 核心逻辑 ---
 def ask_grok(chat_id, user_input):
     if chat_id not in conversation_history:
         conversation_history[chat_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     conversation_history[chat_id].append({"role": "user", "content": user_input})
-
-    if len(conversation_history[chat_id]) > 10:
-        conversation_history[chat_id] = [conversation_history[chat_id][0]] + conversation_history[chat_id][-9:]
 
     try:
         response = client.chat.completions.create(
@@ -162,6 +163,7 @@ def ask_grok(chat_id, user_input):
             for tool_call in msg.tool_calls:
                 func_name = tool_call.function.name
                 args = json.loads(tool_call.function.arguments)
+                # 注意这里传入了 chat_id 以便发图
                 result = call_tool(func_name, args, chat_id)
 
                 conversation_history[chat_id].append({
@@ -179,13 +181,13 @@ def ask_grok(chat_id, user_input):
         else:
             final_reply = msg.content
     except Exception as e:
-        final_reply = f"Aiyoh, something went wrong: {str(e)}"
+        final_reply = f"Aiyoh, error: {str(e)}"
 
     conversation_history[chat_id].append({"role": "assistant", "content": final_reply})
     return final_reply
 
 
-# --- 8. 接口定义 ---
+# --- 9. 接口定义 ---
 @app.route('/')
 def home():
     return "Universal Art-AI Bot is Running!"
@@ -198,6 +200,8 @@ def telegram_webhook():
         chat_id = str(data["message"]["chat"]["id"])
         text = data["message"].get("text", "")
         reply = ask_grok(chat_id, text)
+
+        # 发送文本回复
         send_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         requests.post(send_url, json={"chat_id": chat_id, "text": reply})
     return "ok", 200
