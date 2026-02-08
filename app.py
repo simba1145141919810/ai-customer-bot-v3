@@ -9,10 +9,17 @@ load_dotenv()
 
 app = Flask(__name__)
 
+# --- 核心配置：直接在函数外层通过 os.environ 确保全局访问 ---
+# 建议在 Railway Variables 中设置这些 Key
+def get_env_var(name):
+    value = os.environ.get(name)
+    if not value:
+        print(f"Warning: Environment variable {name} is missing!")
+    return value
+
 # Grok 配置
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-GROK_API_KEY = os.getenv("GROK_API_KEY")
-OPENAI_API_KEY = GROK_API_KEY  # SDK兼容
+API_KEY = os.getenv("GROK_API_KEY")
 
 client = OpenAI(
     api_key=GROK_API_KEY,
