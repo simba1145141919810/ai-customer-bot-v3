@@ -5,13 +5,12 @@ from flask import Flask, request, jsonify
 from openai import OpenAI
 from dotenv import load_dotenv
 
-# 加载本地 .env 文件中的变量
+# 加载本地环境变量
 load_dotenv()
 
 app = Flask(__name__)
 
 # --- 1. 配置初始化 ---
-# 这里的变量名必须与你在 Railway 后台 Variables 设置的一致
 GROK_API_KEY = os.getenv("GROK_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 
@@ -20,49 +19,50 @@ client = OpenAI(
     base_url="https://api.x.ai/v1"
 )
 
-# 使用适合对话的 Grok 模型
 MODEL_NAME = "grok-4-1-fast-reasoning"
 
-# --- 2. 模拟数据库 (以后可以连接真实数据库) ---
+# --- 2. 模拟数据库 (未来接入真实 API) ---
 FAKE_ORDERS = {
     "14514": {"status": "已发货", "tracking": "J&T Express: JT123456", "items": "Redmi Note 12"},
-    "12345": {"status": "处理中", "tracking": "未生成", "items": "Samsung A14"}
+    "12345": {"status": "处理中", "items": "Samsung A14"}
 }
 
-FAKE_PRODUCTS = [
-    {"name": "Redmi Note 12", "price": "SGD 299", "specs": "120Hz屏, 5000mAh电池"},
-    {"name": "Samsung A14", "price": "SGD 219", "specs": "三星品质, 拍照稳"}
-]
+# --- 3. 存储对话历史 (简单内存存储，重启后重置) ---
+# 在生产环境中，我们会改用 Redis 来永久存储
+conversation_history = {}
 
+# --- 4. 系统提示词 (System Prompt) ---
+# 这里是颠覆逻辑的核心：赋予 AI 审美眼光和本地灵魂
+SYSTEM_PROMPT = """
+# Role
+你是一个在东南亚电商界赫赫有名的“金牌导购+销售+客服”。你不仅懂产品，更懂美学和生活方式。
 
-# --- 3. AI 工具函数定义 ---
-def get_order_status(order_number: str):
-    order = FAKE_ORDERS.get(order_number)
-    if order:
-        return f"订单 {order_number}：{order['status']}，物流：{order['tracking']}。"
-    return f"抱歉，没找到订单 {order_number}。"
+# Tone & Style
+1. **地道表达**：你是擅长世界各国语言，尤其是东南亚各国语言，根据用户语言无缝切换，同时保持幽默感。
+2. **审美赋能**：你擅长艺术，设计，推销，所以你对颜色、材质、设计有专业见解。不要只报参数，要告诉用户这个产品“怎么美”。
+3. **颠覆逻辑**：如果用户嫌贵，不要只给折扣，要告诉他/她“这是一种对生活的投资”。
 
+# Goals
+- 解决问题是基础，提供情绪价值和审美建议是核心。
+- 引导用户查询订单 (get_order_status) 或推荐产品。
+- 如果客户浏览或购买了本商店的商品，可以在客户浏览中或订单结束之后向客户推荐本店其他类似或正在打折有活动的商品。
+"""
 
-def search_products(query: str):
-    # 简单的搜索逻辑
-    return f"为您找到关于 '{query}' 的产品：Redmi Note 12 (SGD 299)。"
-
-
-# AI 可以调用的工具声明
+# --- 5. 工具定义 ---
 tools = [
     {
         "type": "function",
         "function": {
             "name": "get_order_status",
-            "description": "查询订单状态",
+            "description": "查询订单实时状态",
             "parameters": {
                 "type": "object",
                 "properties": {"order_number": {"type": "string"}},
                 "required": ["order_number"]
             }
         }
-    },
-    {
+    }
+{
         "type": "function",
         "function": {
             "name": "search_products",
@@ -77,80 +77,77 @@ tools = [
 ]
 
 
-# --- 4. 核心 AI 处理引擎 ---
-# 这个函数是通用的，不分平台
-def ask_grok(user_input):
-    messages = [
-        {"role": "system", "content": "你是一个地道的东南亚电商客服，说话亲切，偶尔可以用 Singlish。"},
-        {"role": "user", "content": user_input}
-    ]
+# --- 6. AI 核心逻辑 ---
+def ask_grok(chat_id, user_input):
+    # 初始化历史记录
+    if chat_id not in conversation_history:
+        conversation_history[chat_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
+
+    # 加入用户新消息
+    conversation_history[chat_id].append({"role": "user", "content": user_input})
+
+    # 限制历史长度，防止超过 Token 限制
+    if len(conversation_history[chat_id]) > 10:
+        conversation_history[chat_id] = [conversation_history[chat_id][0]] + conversation_history[chat_id][-9:]
 
     response = client.chat.completions.create(
         model=MODEL_NAME,
-        messages=messages,
+        messages=conversation_history[chat_id],
         tools=tools,
         tool_choice="auto"
     )
 
-    response_message = response.choices[0].message
+    msg = response.choices[0].message
 
-    # 如果 AI 决定调用工具
-    if response_message.tool_calls:
-        for tool_call in response_message.tool_calls:
-            function_name = tool_call.function.name
+    # 处理工具调用
+    if msg.tool_calls:
+        for tool_call in msg.tool_calls:
             args = json.loads(tool_call.function.arguments)
+            order_id = args.get("order_number")
+            result = FAKE_ORDERS.get(order_id, "Sorry, order not found leh.")
 
-            if function_name == "get_order_status":
-                result = get_order_status(args.get("order_number"))
-            else:
-                result = search_products(args.get("query"))
+            # 将结果喂回给 AI
+            conversation_history[chat_id].append(msg)
+            conversation_history[chat_id].append({
+                "role": "tool",
+                "tool_call_id": tool_call.id,
+                "name": "get_order_status",
+                "content": str(result)
+            })
 
-            # 将工具结果返回给 AI 进行最终润色
-            messages.append(response_message)
-            messages.append({"role": "tool", "tool_call_id": tool_call.id, "name": function_name, "content": result})
+            second_res = client.chat.completions.create(
+                model=MODEL_NAME,
+                messages=conversation_history[chat_id]
+            )
+            final_reply = second_res.choices[0].message.content
+    else:
+        final_reply = msg.content
 
-            second_response = client.chat.completions.create(model=MODEL_NAME, messages=messages)
-            return second_response.choices[0].message.content
+    # 保存 AI 的回复到历史
+    conversation_history[chat_id].append({"role": "assistant", "content": final_reply})
+    return final_reply
 
-    return response_message.content
 
-
-# --- 5. 接口路由 ---
-
-# 首页，用于检查服务是否在线
+# --- 7. 接口定义 ---
 @app.route('/')
 def home():
-    return "AI Bot is Online!"
+    return "SE-Asia AI Agent is Running!"
 
 
-# Telegram 专用 Webhook 接口
 @app.route('/telegram', methods=['POST'])
 def telegram_webhook():
     data = request.get_json()
     if "message" in data:
-        chat_id = data["message"]["chat"]["id"]
-        user_text = data["message"].get("text", "")
+        chat_id = str(data["message"]["chat"]["id"])
+        text = data["message"].get("text", "")
 
-        # 获取 AI 回复
-        reply = ask_grok(user_text)
+        reply = ask_grok(chat_id, text)
 
-        # 发送回 Telegram
         send_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         requests.post(send_url, json={"chat_id": chat_id, "text": reply})
-
     return "ok", 200
 
 
-# 通用 API 接口 (以后给其他软件用)
-@app.route('/api/chat', methods=['POST'])
-def api_chat():
-    data = request.get_json()
-    msg = data.get("message")
-    reply = ask_grok(msg)
-    return jsonify({"reply": reply})
-
-
 if __name__ == '__main__':
-    # 自动适配端口
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
