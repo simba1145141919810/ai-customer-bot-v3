@@ -1,18 +1,17 @@
 import os
-import json
-import requests
+from dotenv import load_dotenv
 from flask import Flask, request, jsonify
 from openai import OpenAI
-from dotenv import load_dotenv
+import requests
+import json
 
-# 加载环境变量
 load_dotenv()
 
 app = Flask(__name__)
 
-# --- 1. 配置初始化 ---
+# Grok 配置
 GROK_API_KEY = os.getenv("GROK_API_KEY")
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+OPENAI_API_KEY = GROK_API_KEY  # SDK兼容
 
 client = OpenAI(
     api_key=GROK_API_KEY,
@@ -21,56 +20,145 @@ client = OpenAI(
 
 MODEL_NAME = "grok-4-1-fast-reasoning"
 
-# --- 2. 模拟数据库 (包含图片链接) ---
+# 模拟数据库（真实部署时替换为Shopee/Lazada API）
 FAKE_ORDERS = {
-    "14514": {"status": "已发货", "tracking": "J&T Express: JT123456", "items": "极简几何手机壳"},
-    "12345": {"status": "处理中", "items": "莫奈色系装饰画"}
+    "14514": {
+        "status": "已发货",
+        "tracking": "J&T Express: JT123456",
+        "items": "Redmi Note 12",
+        "image_url": "https://example.com/images/redmi_note12.jpg"  # 店铺真实产品图
+    },
+    "12345": {
+        "status": "处理中",
+        "tracking": "未生成",
+        "items": "Samsung A14",
+        "image_url": "https://example.com/images/samsung_a14.jpg"
+    },
+    "99999": {
+        "status": "已退货",
+        "tracking": "退款中",
+        "items": "Running Shoes",
+        "image_url": "https://example.com/images/running_shoes.jpg"
+    }
 }
 
 FAKE_PRODUCTS = [
     {
-        "name": "极简几何手机壳",
-        "price": "SGD 25",
-        "style": "包豪斯主义",
-        "desc": "线条利落，适合追求理性的你。配合侘寂风桌面绝佳。",
-        "img": "https://images.unsplash.com/photo-1603313011101-31c726a54881?auto=format&fit=crop&w=500&q=80"
+        "name": "Redmi Note 12",
+        "price": "SGD 299",
+        "specs": "120Hz屏, 5000mAh电池, 骁龙处理器",
+        "image_url": "https://example.com/images/redmi_note12.jpg"
     },
     {
-        "name": "莫奈色系装饰画",
+        "name": "Realme C55",
+        "price": "SGD 189",
+        "specs": "大电池快充, 自拍强",
+        "image_url": "https://example.com/images/realme_c55.jpg"
+    },
+    {
+        "name": "Samsung A14",
+        "price": "SGD 219",
+        "specs": "三星品质, 拍照稳",
+        "image_url": "https://example.com/images/samsung_a14.jpg"
+    },
+    {
+        "name": "iPhone 13",
+        "price": "SGD 999",
+        "specs": "苹果生态, 性能顶",
+        "image_url": "https://example.com/images/iphone13.jpg"
+    },
+    {
+        "name": "Running Shoes",
         "price": "SGD 89",
-        "style": "印象派",
-        "desc": "色彩柔和，能瞬间提升客厅的艺术氛围。",
-        "img": "https://images.unsplash.com/photo-1579783902614-a3fb3927b6a5?auto=format&fit=crop&w=500&q=80"
+        "specs": "轻便透气, 适合跑步",
+        "image_url": "https://example.com/images/running_shoes.jpg"
+    }
+]
+
+# 工具定义（新增获取真实产品图片）
+tools = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_order_status",
+            "description": "查询订单状态，返回文字+产品真实图片",
+            "parameters": {
+                "type": "object",
+                "properties": {"order_number": {"type": "string"}},
+                "required": ["order_number"]
+            }
+        }
     },
     {
-        "name": "手工陶瓷马克杯",
-        "price": "SGD 35",
-        "style": "侘寂风",
-        "desc": "不完美的肌理，触感温润，每一件都是独一无二。",
-        "img": "https://images.unsplash.com/photo-1580915411954-282cb1b0d780?auto=format&fit=crop&w=500&q=80"
+        "type": "function",
+        "function": {
+            "name": "search_products",
+            "description": "搜索并推荐产品，返回列表+每件商品真实图片",
+            "parameters": {
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_product_image",
+            "description": "生成产品场景图（如搭配图、效果图）",
+            "parameters": {
+                "type": "object",
+                "properties": {"prompt": {"type": "string"}},
+                "required": ["prompt"]
+            }
+        }
     }
 ]
 
 
-# --- 3. 辅助函数：专门发送图片到 Telegram ---
-def send_telegram_photo(chat_id, photo_url, caption):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-    payload = {
-        "chat_id": chat_id,
-        "photo": photo_url,
-        "caption": caption,
-        "parse_mode": "Markdown"
-    }
+def get_order_status(order_number: str):
+    order = FAKE_ORDERS.get(order_number)
+    if order:
+        text = f"订单 {order_number}：{order['status']}，商品 {order['items']}，追踪 {order['tracking']}。"
+        return json.dumps({"text": text, "image_url": order.get("image_url")})
+    return json.dumps({"text": f"未找到订单 {order_number}。", "image_url": None})
+
+
+def search_products(query: str):
+    query_lower = query.lower()
+    keywords = query_lower.split()
+    matches = []
+    for p in FAKE_PRODUCTS:
+        if any(k in p["name"].lower() or k in p["specs"].lower() for k in
+               keywords) or "便宜" in query_lower or "替代" in query_lower:
+            matches.append(p)
+    if not matches:
+        return json.dumps({"text": "抱歉，没找到匹配商品。", "images": []})
+
+    text = "为您推荐这些：\n"
+    images = []
+    for i, p in enumerate(matches[:5], 1):
+        text += f"{i}. {p['name']} - {p['price']}\n   {p['specs']}\n"
+        if p.get("image_url"):
+            images.append(p["image_url"])
+
+    return json.dumps({"text": text, "images": images})
+
+
+def generate_product_image(prompt: str):
     try:
-        requests.post(url, json=payload)
+        response = client.images.generate(
+            model="flux",
+            prompt=prompt,
+            n=1,
+            size="1024x1024"
+        )
+        image_url = response.data[0].url
+        return json.dumps({"text": "为您生成场景图：", "image_url": image_url})
     except Exception as e:
-        print(f"发送图片失败: {e}")
+        return json.dumps({"text": f"生成失败：{str(e)}", "image_url": None})
 
 
-# --- 4. 存储对话历史 ---
-conversation_history = {}
-
-# --- 5. 系统提示词 ---
 SYSTEM_PROMPT = """
 # Role
 你是一个在东南亚电商界赫赫有名的“金牌导购+销售+客服”。你不仅懂产品，更懂美学和生活方式。
@@ -90,121 +178,100 @@ SYSTEM_PROMPT = """
 - 用户查进度时，必须调用 get_order_status。
 """
 
-# --- 6. 工具定义 ---
-tools = [
-    {
-        "type": "function",
-        "function": {
-            "name": "get_order_status",
-            "description": "查询订单实时状态",
-            "parameters": {
-                "type": "object",
-                "properties": {"order_number": {"type": "string"}},
-                "required": ["order_number"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_products",
-            "description": "搜索产品推荐、风格匹配或艺术单品",
-            "parameters": {
-                "type": "object",
-                "properties": {"query": {"type": "string"}},
-                "required": ["query"]
-            }
-        }
-    }
-]
+conversation_history = {}
 
 
-# --- 7. 工具逻辑实现 ---
-def call_tool(func_name, args, chat_id):
-    if func_name == "get_order_status":
-        order_id = args.get("order_number")
-        return str(FAKE_ORDERS.get(order_id, "Sorry, no record for this order number leh."))
-
-    if func_name == "search_products":
-        query = args.get("query", "").lower()
-        results = [p for p in FAKE_PRODUCTS if query in p['name'].lower() or query in p['style'].lower()]
-
-        if results:
-            target = results[0]
-            # 找到产品，立刻触发发图
-            caption = f"*{target['name']}*\nPrice: {target['price']}\nStyle: {target['style']}"
-            send_telegram_photo(chat_id, target['img'], caption)
-            return f"Found it! 我已经把图片的预览发给你了。这是我们的{target['name']}，{target['desc']}"
-
-        return "Aiyoh, nothing exact match, but check our latest Art Series: " + str(FAKE_PRODUCTS[0])
-
-    return "Unknown tool."
+def send_telegram_message(chat_id, text=None, photo=None):
+    if photo:
+        payload = {"chat_id": chat_id, "photo": photo, "caption": text or ""}
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto", json=payload)
+    elif text:
+        payload = {"chat_id": chat_id, "text": text}
+        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload)
 
 
-# --- 8. AI 核心逻辑 ---
-def ask_grok(chat_id, user_input):
-    if chat_id not in conversation_history:
-        conversation_history[chat_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    update = request.get_json()
 
-    conversation_history[chat_id].append({"role": "user", "content": user_input})
+    if 'message' in update:
+        chat_id = update['message']['chat']['id']
+        user_text = update['message'].get('text', '')
 
-    try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=conversation_history[chat_id],
-            tools=tools,
-            tool_choice="auto"
-        )
+        if chat_id not in conversation_history:
+            conversation_history[chat_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-        msg = response.choices[0].message
+        conversation_history[chat_id].append({"role": "user", "content": user_text})
 
-        if msg.tool_calls:
-            conversation_history[chat_id].append(msg)
-            for tool_call in msg.tool_calls:
-                func_name = tool_call.function.name
-                args = json.loads(tool_call.function.arguments)
-                # 注意这里传入了 chat_id 以便发图
-                result = call_tool(func_name, args, chat_id)
-
-                conversation_history[chat_id].append({
-                    "role": "tool",
-                    "tool_call_id": tool_call.id,
-                    "name": func_name,
-                    "content": result
-                })
-
-            second_res = client.chat.completions.create(
+        try:
+            response = client.chat.completions.create(
                 model=MODEL_NAME,
-                messages=conversation_history[chat_id]
+                messages=conversation_history[chat_id],
+                tools=tools,
+                tool_choice="auto",
+                max_tokens=512,
+                temperature=0.7
             )
-            final_reply = second_res.choices[0].message.content
-        else:
-            final_reply = msg.content
-    except Exception as e:
-        final_reply = f"Aiyoh, error: {str(e)}"
 
-    conversation_history[chat_id].append({"role": "assistant", "content": final_reply})
-    return final_reply
+            message = response.choices[0].message
+            reply_text = message.content or ""
+
+            images = []
+            if message.tool_calls:
+                for tool_call in message.tool_calls:
+                    func_name = tool_call.function.name
+                    args = json.loads(tool_call.function.arguments)
+
+                    result_str = ""
+                    if func_name == "get_order_status":
+                        result_str = get_order_status(args["order_number"])
+                    elif func_name == "search_products":
+                        result_str = search_products(args["query"])
+                    elif func_name == "generate_product_image":
+                        result_str = generate_product_image(args["prompt"])
+
+                    result = json.loads(result_str)
+                    reply_text += f"\n{result.get('text', '')}"
+                    image_url = result.get('image_url')
+                    if image_url:
+                        images.append(image_url)
+                    img_list = result.get('images', [])
+                    if img_list:
+                        images.extend(img_list)
+
+                    conversation_history[chat_id].append({
+                        "role": "tool",
+                        "tool_call_id": tool_call.id,
+                        "name": func_name,
+                        "content": result_str
+                    })
+
+                # 二次调用整合文字
+                second_response = client.chat.completions.create(
+                    model=MODEL_NAME,
+                    messages=conversation_history[chat_id],
+                    max_tokens=512
+                )
+                reply_text = second_response.choices[0].message.content
+
+            # 发送：优先图片+文字，其次纯文字
+            if images:
+                # 发送第一张图+文字，其他图单独发（Telegram限制）
+                send_telegram_message(chat_id, reply_text, images[0])
+                for img in images[1:]:
+                    send_telegram_message(chat_id, None, img)
+            else:
+                send_telegram_message(chat_id, reply_text)
+
+        except Exception as e:
+            send_telegram_message(chat_id, "抱歉，系统出错，请稍后再试。")
+
+    return jsonify({"status": "ok"})
 
 
-# --- 9. 接口定义 ---
 @app.route('/')
 def home():
-    return "Universal Art-AI Bot is Running!"
-
-
-@app.route('/telegram', methods=['POST'])
-def telegram_webhook():
-    data = request.get_json()
-    if data and "message" in data:
-        chat_id = str(data["message"]["chat"]["id"])
-        text = data["message"].get("text", "")
-        reply = ask_grok(chat_id, text)
-
-        # 发送文本回复
-        send_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(send_url, json={"chat_id": chat_id, "text": reply})
-    return "ok", 200
+    return "Bot running!"
 
 
 if __name__ == '__main__':
