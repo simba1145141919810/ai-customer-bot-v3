@@ -1,0 +1,24 @@
+{
+    "products": [
+      {
+        "name": "极简几何手机壳",
+        "price": "SGD 25",
+        "style": "包豪斯",
+        "img": "https://images.unsplash.com/photo-1603313011101-31c726a54881?w=500",
+        "buy_url": "https://shopee.sg",
+        "desc": "线条利落，适合追求理性的你。"
+      },
+      {
+        "name": "手工陶瓷马克杯",
+        "price": "SGD 35",
+        "style": "侘寂",
+        "img": "https://images.unsplash.com/photo-1580915411954-282cb1b0d780?w=500",
+        "buy_url": "https://lazada.sg",
+        "desc": "温润如玉，每一只都独一无二。"
+      }
+    ],
+    "orders": {
+      "14514": {"status": "已送达", "items": "极简几何手机壳", "tracking": "J&T Express: JT123"},
+      "12345": {"status": "待揽收", "items": "手工陶瓷马克杯", "tracking": "准备中"}
+    }
+  }
