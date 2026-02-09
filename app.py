@@ -27,7 +27,7 @@ SUPABASE_KEY = get_env("SUPABASE_KEY")
 # 初始化客户端
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 client = OpenAI(api_key=GROK_KEY, base_url="https://api.x.ai/v1")
-MODEL_NAME = "grok-4-1-fast-reasoning"  # 强制使用最稳定的模型名
+MODEL_NAME = "grok-3"  # 强制使用最稳定的模型名
 
 
 # --- 2. 辅助功能 ---
