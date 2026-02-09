@@ -1,33 +1,26 @@
 import os
 import json
 import requests
+import time
 from flask import Flask, request, jsonify
 from openai import OpenAI
 from supabase import create_client, Client
 from dotenv import load_dotenv
 
-# 加载配置
 load_dotenv()
 app = Flask(__name__)
 
-# --- 1. 核心配置初始化 ---
-# 确保在 Railway Variables 中配置了以下所有 Key
+# --- 1. 配置加载 ---
 TG_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROK_KEY = os.environ.get("GROK_API_KEY")
 SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")  # 填入 anon key
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
 
-# 初始化 Supabase 客户端
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# 初始化 Grok AI 客户端
-client = OpenAI(
-    api_key=GROK_KEY,
-    base_url="https://api.x.ai/v1"
-)
+client = OpenAI(api_key=GROK_KEY, base_url="https://api.x.ai/v1")
 MODEL_NAME = "grok-4-1-fast-reasoning"
 
-# --- 2. 核心商业逻辑提示词 (System Prompt) ---
+# --- 2. 系统提示词 (核心：强制逻辑) ---
 SYSTEM_PROMPT = """
 # Role
 你是一个在东南亚电商界赫赫有名的“金牌导购+销售+客服”。你不仅懂产品，更懂美学和生活方式。
@@ -42,53 +35,63 @@ SYSTEM_PROMPT = """
 - 解决问题是基础，提供情绪价值和审美建议是核心。
 - 引导用户查询订单 (get_order_status) 或推荐产品。
 - 如果客户浏览或购买了本商店的商品，可以在客户浏览中或订单结束之后向客户推荐本店其他类似或正在打折有活动的商品。
+
+# Rules
+1. **订单查询逻辑**：如果用户说要查订单但没给订单号，你必须先礼貌地询问订单号，**严禁直接推荐产品**。
+2. **产品搜索逻辑**：只有当用户表达了购买意向、审美偏好或寻找特定产品时，才调用 search_item。
 """
 
 
-# --- 3. 数据库交互工具函数 ---
+# --- 3. 增强版功能函数 ---
+
+def set_typing(chat_id):
+    """让 Telegram 显示 '正在输入...'"""
+    url = f"https://api.telegram.org/bot{TG_TOKEN}/sendChatAction"
+    requests.post(url, json={"chat_id": chat_id, "action": "typing"})
+
+
+def send_reply(chat_id, text, photo_url=None, buy_url=None):
+    """支持图片、文字和购买按钮的统一回复函数"""
+    reply_markup = None
+    if buy_url:
+        reply_markup = {
+            "inline_keyboard": [[
+                {"text": "🛒 点击直接购买 (Buy Now)", "url": buy_url}
+            ]]
+        }
+
+    if photo_url:
+        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendPhoto"
+        payload = {
+            "chat_id": chat_id, "photo": photo_url, "caption": text,
+            "parse_mode": "Markdown", "reply_markup": reply_markup
+        }
+    else:
+        url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": chat_id, "text": text, "reply_markup": reply_markup
+        }
+    requests.post(url, json=payload, timeout=10)
+
+
+# --- 4. 数据库逻辑 ---
+
 def db_get_order(order_id):
-    """从 Supabase 查询订单状态"""
-    try:
-        res = supabase.table("orders").select("*").eq("order_id", order_id).execute()
-        if not res.data:
-            return f"Aiyoh, 找不到订单 {order_id} 呢，确认一下号码对不对？"
-        order = res.data[0]
-        return f"找到啦！订单 {order_id} 目前是 [{order['status']}]。商品是：{order['items']}。"
-    except Exception as e:
-        return f"查询出错啦: {str(e)}"
+    res = supabase.table("orders").select("*").eq("order_id", order_id).execute()
+    if not res.data:
+        return f"Aiyoh, 找不到订单 {order_id} 呢。是不是记错号了？"
+    order = res.data[0]
+    return f"找到了！订单 {order_id} 现在的状态是：*[{order['status']}]*。商品是：{order['items']}。"
 
 
 def db_search_product(query):
-    """从 Supabase 搜索产品并返回详细信息"""
-    try:
-        # 优先搜索名称，其次搜索风格
-        res = supabase.table("products").select("*").ilike("name", f"%{query}%").execute()
-        if not res.data:
-            res = supabase.table("products").select("*").ilike("style", f"%{query}%").execute()
-
-        return res.data if res.data else []
-    except Exception as e:
-        print(f"DB Search Error: {e}")
-        return []
+    res = supabase.table("products").select("*").ilike("name", f"%{query}%").execute()
+    if not res.data:
+        res = supabase.table("products").select("*").ilike("style", f"%{query}%").execute()
+    return res.data if res.data else []
 
 
-# --- 4. 统一回复函数 ---
-def send_reply(chat_id, text, photo_url=None):
-    token = os.environ.get("TELEGRAM_TOKEN")
-    if photo_url:
-        url = f"https://api.telegram.org/bot{token}/sendPhoto"
-        payload = {"chat_id": chat_id, "photo": photo_url, "caption": text, "parse_mode": "Markdown"}
-    else:
-        url = f"https://api.telegram.org/bot{token}/sendMessage"
-        payload = {"chat_id": chat_id, "text": text}
-
-    try:
-        requests.post(url, json=payload, timeout=10)
-    except Exception as e:
-        print(f"Telegram Post Error: {e}")
-
-
-# --- 5. AI 大脑逻辑 ---
+# --- 5. AI 处理中心 ---
 conversation_history = {}
 
 
@@ -97,13 +100,13 @@ def ask_ai(chat_id, user_text):
         conversation_history[chat_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     conversation_history[chat_id].append({"role": "user", "content": user_text})
+    set_typing(chat_id)
 
-    # 工具声明
     tools = [
-        {"type": "function", "function": {"name": "get_order", "description": "查询订单状态",
+        {"type": "function", "function": {"name": "get_order", "description": "通过订单号查询状态",
                                           "parameters": {"type": "object", "properties": {"id": {"type": "string"}},
                                                          "required": ["id"]}}},
-        {"type": "function", "function": {"name": "search_item", "description": "根据关键词或风格搜索产品",
+        {"type": "function", "function": {"name": "search_item", "description": "搜索产品",
                                           "parameters": {"type": "object", "properties": {"q": {"type": "string"}},
                                                          "required": ["q"]}}}
     ]
@@ -123,40 +126,38 @@ def ask_ai(chat_id, user_text):
                 args = json.loads(call.function.arguments)
 
                 if func_name == "get_order":
-                    result_text = db_get_order(args.get("id"))
-                    send_reply(chat_id, result_text)
-
+                    reply = db_get_order(args.get("id"))
+                    send_reply(chat_id, reply)
                 elif func_name == "search_item":
                     items = db_search_product(args.get("q"))
                     if items:
                         item = items[0]
-                        caption = f"*{item['name']}* - {item['price']}\n\nStyle: {item['style']}\n_{item['desc']}_"
-                        send_reply(chat_id, caption, item['img'])
+                        caption = f"*{item['name']}* - {item['price']}\n\nStyle: {item['style']}\n_{item.get('desc', '')}_"
+                        send_reply(chat_id, caption, item.get('img'), item.get('buy_url'))
                     else:
-                        send_reply(chat_id, "Aiyoh, 没找到完全匹配的，但看看我们店的其他艺术品？")
-            return "Processed"
+                        send_reply(chat_id, "Aiyoh, 没找到完全匹配的单品，要不看看其他的？")
+            return
 
-        # 纯文字回复
+        # 纯文本回复
         send_reply(chat_id, msg.content)
         conversation_history[chat_id].append(msg)
+
     except Exception as e:
-        send_reply(chat_id, f"Aiyoh, something is wrong: {str(e)}")
+        print(f"Error: {e}")
+        send_reply(chat_id, "信号被干扰了，请再试一次！")
 
 
-# --- 6. 接口适配 ---
+# --- 6. Webhook 接口 ---
 @app.route('/webhook', methods=['POST'])
 def webhook():
     data = request.get_json()
     if data and "message" in data:
-        chat_id = data["message"]["chat"]["id"]
-        text = data["message"].get("text", "")
-        ask_ai(chat_id, text)
+        ask_ai(data["message"]["chat"]["id"], data["message"].get("text", ""))
     return "ok", 200
 
 
 @app.route('/')
-def home():
-    return "AI Retail Hub (Supabase Edition) is Active!"
+def home(): return "Commercial AI Agent (Pro Version) is Active!"
 
 
 if __name__ == '__main__':
